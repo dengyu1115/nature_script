@@ -1,169 +1,23 @@
 from decimal import Decimal, ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_UP
 from datetime import datetime, timedelta
-from sql_builder import sql_one, sql_each
 import bisect
-from consts import SCALE_3, SCALE_4, ZERO, ONE, HUNDRED, FORMAT_DATE
-from org.nature.util import PythonUtil
-from org.nature.exception import Warn
 
-sql_create_table = """
-CREATE TABLE IF NOT EXISTS etf_rule (
-    code TEXT NOT NULL,
-    type TEXT NOT NULL,
-    name TEXT NOT NULL,
-    rule_type TEXT NOT NULL,
-    status TEXT NOT NULL,
-    start_date TEXT,
-    amount_base REAL NOT NULL,
-    ratio REAL NOT NULL,
-    expansion REAL NOT NULL,
-    PRIMARY KEY (code,type,name)
-)
-"""
+SCALE_2 = Decimal("0.01")
+SCALE_3 = Decimal("0.001")
+SCALE_4 = Decimal("0.0001")
+ZERO = Decimal("0")
+ONE = Decimal("1")
+HUNDRED = Decimal("100")
 
-PythonUtil.ddl("nature/biz.db", sql_create_table)
-
-
-def list_valid():
-    return PythonUtil.list(
-        "nature/biz.db",
-        "select * from etf_rule where status='1'",
-    )
-
-
-def list_all():
-    return PythonUtil.list(
-        "nature/biz.db",
-        "select * from etf_rule",
-    )
-
-
-def list_by_dynamic(code=None, type=None, name=None, status=None):
-    sql = "select * from etf_rule where 1=1"
-    param = {}
-    if code and type:
-        sql += " and code={code} and type={type}"
-        param.update({"code": code, "type": type})
-    if name:
-        sql += " and name={name}"
-        param.update({"name": name})
-    if status:
-        sql += " and status={status}"
-        param.update({"status": status})
-    return PythonUtil.list(
-        "nature/biz.db",
-        sql_one(sql, param),
-    )
-
-
-def find_by_id(datum):
-    return PythonUtil.find(
-        "nature/biz.db",
-        sql_one(
-            "select * from etf_rule where code={code} and type={type} and name={name}",
-            datum,
-        ),
-    )
-
-
-def save_to_db(data):
-    return PythonUtil.update(
-        "nature/biz.db",
-        sql_each(
-            "insert into etf_rule(code,type,name,rule_type,status,start_date,amount_base,ratio,expansion) values[({code},{type},{name},{rule_type},{status},{start_date},{amount_base},{ratio},{expansion})]",
-            data,
-        ),
-    )
-
-
-def update_to_db(datum):
-    return PythonUtil.update(
-        "nature/biz.db",
-        sql_one(
-            "update etf_rule set rule_type={rule_type},status={status},start_date={start_date},amount_base={amount_base},ratio={ratio},expansion={expansion} where code={code} and type={type} and name={name}",
-            datum,
-        ),
-    )
-
-
-def delete_from_db(datum):
-    return PythonUtil.update(
-        "nature/biz.db",
-        sql_one(
-            "delete from etf_rule where code={code} and type={type} and name={name}",
-            datum,
-        ),
-    )
-
-
-def list_by_con(code, type, rule_type, keyword):
-    sql = "select name,code,type,rule_type,amount_base,start_date,ratio,expansion,status from etf_rule where name like {keyword}"
-    param = {"keyword": "%" + keyword + "%"}
-    if code and type:
-        sql = sql + " and code={code} and type={type}"
-        param.update({"code": code, "type": type})
-    if rule_type:
-        sql = sql + " and rule_type={rule_type}"
-        param.update({"rule_type": rule_type})
-    return PythonUtil.list(
-        "nature/biz.db",
-        sql_one(sql, param),
-    )
-
-
-def do_validate(datum):
-    if "code" not in datum or not datum["code"]:
-        raise Warn("编号不可为空")
-    if "type" not in datum or not datum["type"]:
-        raise Warn("类型不可为空")
-    if "name" not in datum or not datum["name"]:
-        raise Warn("名称不可为空")
-    if "rule_type" not in datum or not datum["rule_type"]:
-        raise Warn("规则类型不可为空")
-    if "status" not in datum or not datum["status"]:
-        raise Warn("状态不可为空")
-    if datum["status"] not in ["0", "1"]:
-        raise Warn("状态只能为启用或暂停")
-    if (
-        "amount_base" not in datum
-        or not datum["amount_base"]
-        or datum["amount_base"] <= 0
-    ):
-        raise Warn("金额基数必须大于0")
-    if "ratio" not in datum or not datum["ratio"] or datum["ratio"] <= 0:
-        raise Warn("涨幅必须大于0")
-    if "expansion" not in datum or datum["expansion"] is None:
-        raise Warn("扩大幅度不可为空")
-
-
-def do_save(datum):
-    do_validate(datum)
-    if find_by_id(datum):
-        raise Warn("数据已存在")
-    return save_to_db([datum])
-
-
-def do_update(datum):
-    do_validate(datum)
-    if not find_by_id(datum):
-        raise Warn("数据不存在")
-    return update_to_db(datum)
-
-
-def do_delete(datum):
-    if "code" not in datum or not datum["code"]:
-        raise Warn("编号不可为空")
-    if "type" not in datum or not datum["type"]:
-        raise Warn("类型不可为空")
-    if "name" not in datum or not datum["name"]:
-        raise Warn("名称不可为空")
-    return delete_from_db(datum)
+FORMAT_DATE = "%Y%m%d"
+import json
 
 
 class Simulator:
 
     def __init__(self, rule, kline_list):
-        self.rule_type = rule["rule_type"]
+        self.grid_type = rule["grid_type"]
+        self.profit_type = rule["profit_type"]
         self.amount_base = rule["amount_base"]
         self.expansion = rule["expansion"]
         ratio = rule["ratio"]
@@ -188,6 +42,7 @@ class Simulator:
         self.times_sell = 0
         self.level = 0
         self.curr = None
+        self.price_diff = ZERO
 
     def calc(self):
         if not self.kline_list:
@@ -236,7 +91,6 @@ class Simulator:
                     "date_buy": datetime.now().strftime(FORMAT_DATE),
                     "share_mark": share,
                     "share_buy": share,
-                    "amount_buy": share * mark,
                 }
             )
         for i in range(min(len(holds), count)):
@@ -246,20 +100,16 @@ class Simulator:
             price_cell = (price_mark * self.ratio_sell).quantize(
                 SCALE_3, rounding=ROUND_CEILING
             )
-            if self.rule_type == "1":
+            if self.profit_type == "1":
                 share = self._calc_share(price_mark)
-            elif self.rule_type == "2":
+            elif self.profit_type == "2":
                 share = self._calc_share(price_cell)
             else:
                 share = hold["share_buy"]
-            hold.update(
-                {
-                    "share_sell": share,
-                    "price_sell": price_cell,
-                    "amount_sell": share * price_cell,
-                    "amount_profit": (price_cell - hold["price_buy"]) * share,
-                }
-            )
+            hold["share_sell"] = share
+            hold["price_sell"] = price_cell
+            hold["amount_sell"] = share * price_cell
+            hold["amount_profit"] = (price_cell - hold["price_buy"]) * share
             results.append(hold)
         return results
 
@@ -319,13 +169,15 @@ class Simulator:
         low = self.curr["low"]
         mark = self.holds_temp[0]["price_mark"] if self.holds_temp else self.last
         target = (mark * self.ratio_buy).quantize(SCALE_3, rounding=ROUND_FLOOR)
+        diff = mark - target
+        if diff > self.price_diff:
+            self.price_diff = diff
         if low > target:
             return False
         open_price = self.curr["open"]
         price = open_price if target > open_price else target
         share = self._calc_share(price)
-        share_mark = self._calc_share(target)
-        money = price * share
+        share_mark = self._calc_share(mark)
         hold = {
             "date_buy": self.curr["date"],
             "level": self.level,
@@ -333,14 +185,15 @@ class Simulator:
             "price_buy": price,
             "share_mark": share_mark,
             "share_buy": share,
-            "amount_buy": money,
             "reason": "compare" if self.holds else "empty",
         }
         self._add_sorted(self.holds_temp, hold)
         self.hold_list.append(hold)
+        money = price * share
         self.share_total += share
         self.paid_total += money
         self.paid_left += money
+        hold["amount_buy"] = money
         if self.paid_left > self.paid_max:
             self.paid_max = self.paid_left
         self.times_buy += 1
@@ -349,18 +202,34 @@ class Simulator:
     def _do_sell(self):
         if not self.holds:
             return False
+        hold_size = len(self.holds) - 1
         first = self.holds[0]
         mark = first["price_mark"]
         price_buy = first["price_buy"]
-        target = (mark * self.ratio_sell).quantize(SCALE_3, rounding=ROUND_CEILING)
+        if self.grid_type == "1":
+            target = mark + self.price_diff
+        elif self.grid_type == "2":
+            target = (
+                mark * (ONE + (self.ratio_sell - ONE) * (self.ratio_sell**hold_size))
+            ).quantize(SCALE_3, rounding=ROUND_CEILING)
+        elif self.grid_type == "3":
+            target = (mark + self.price_diff * (self.ratio_sell**hold_size)).quantize(
+                SCALE_3, rounding=ROUND_CEILING
+            )
+        elif self.grid_type == "4":
+            target = ((mark * self.ratio_sell ** (hold_size + 1))).quantize(
+                SCALE_3, rounding=ROUND_CEILING
+            )
+        else:
+            target = (mark * self.ratio_sell).quantize(SCALE_3, rounding=ROUND_CEILING)
         high = self.curr["high"]
         if target > high:
             return False
         open_price = self.curr["open"]
         price_sell = open_price if target < open_price else target
-        if self.rule_type == "1":
+        if self.profit_type == "1":
             share = self._calc_share(target)
-        elif self.rule_type == "2":
+        elif self.profit_type == "2":
             share = self._calc_share(price_sell)
         else:
             share = first["share_buy"]
@@ -431,3 +300,44 @@ def init_simulator(rule, kline_list):
     rule["ratio"] = Decimal(rule["ratio"])
     rule["expansion"] = Decimal(rule["expansion"])
     return Simulator(rule, kline_list)
+
+
+if __name__ == "__main__":
+    import os
+
+    rule = {
+        "code": "159941",
+        "name": "百1加投",
+        "type": "0",
+        "grid_type": "4",
+        "profit_type": "2",
+        "amount_base": "10000",
+        "ratio": "0.01",
+        "expansion": "0",
+    }
+    # 读取json文件获取K线数据
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    kline_path = os.path.join(script_dir, "kline.json")
+    with open(kline_path, "r", encoding="utf-8") as f:
+        kline_lines = json.load(f)
+    kline_list = [
+        {
+            "code": "159941",
+            "type": "0",
+            "date": parts[0].replace("-", ""),
+            "open": Decimal(parts[1]),
+            "latest": Decimal(parts[2]),
+            "high": Decimal(parts[3]),
+            "low": Decimal(parts[4]),
+            "share": Decimal(parts[5]),
+            "amount": Decimal(parts[6]),
+        }
+        for line in kline_lines
+        for parts in [line.strip().split(",")]
+        if len(parts) >= 7
+    ]
+    simulator = init_simulator(rule, kline_list)
+    simulator.calc()
+    profits = simulator.list_profit()
+    if profits:
+        print(profits[-1])

@@ -138,6 +138,7 @@ def list_latest(datum):
 def list_latest_by_con(code=None, type=None, rule=None, handle=None):
     etf_rules = etf_rule.list_by_dynamic(code, type, rule, "1")
     res_list = PythonUtil.multiThread(etf_rules, list_latest)
+    
 
     def _filter(i):
         if handle == "buy":
